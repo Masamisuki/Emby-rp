@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -796,7 +796,7 @@ cmd_add() {
 
 	local domain="" engine="" mode="" prefix="" strip="0" frontend="" upstream=""
 	local tls="" cert="" key="" email="" name="" http_port="" https_port=""
-	local cf="0" insecure="0" access_log="1" yes=0 pick
+	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -818,6 +818,7 @@ cmd_add() {
 			--cf)          cf="1"; shift ;;
 			--upstream-insecure) insecure="1"; shift ;;
 			--no-log)      access_log="0"; shift ;;
+			--force)       force=1; shift ;;
 			-y|--yes)      yes=1; shift ;;
 			-h|--help)     usage; return 0 ;;
 			*) die "未知参数：$1（--help 查看帮助）" ;;
@@ -834,6 +835,25 @@ cmd_add() {
 	domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]' | sed 's#^https\?://##; s#/.*##; s#:[0-9]*$##')"
 	[[ -n "$domain" ]] || die "域名不能为空"
 	[[ "$domain" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$ ]] || die "域名格式不对：$domain"
+
+	# ---------- 站点名冲突（提前检查，别问完全部才失败） ----------
+	[[ -n "$name" ]] || name="$(gen_name_from_domain "$domain")"
+	[[ -n "$name" ]] || name="site"
+	if [[ -f "$SITES_DIR/${name}.conf" ]]; then
+		local old_domain
+		old_domain="$(sed -n 's/^SITE_DOMAIN=//p' "$SITES_DIR/${name}.conf" 2>/dev/null | tr -d "'\"" | head -n1)"
+		warn "站点 ${name} 已存在（域名 ${old_domain:-未知}）"
+		if [[ $force -eq 1 ]]; then
+			info "--force：先拆除旧配置，再按新参数重建"
+			site_teardown "$name" || die "拆除旧站点失败"
+		elif [[ $yes -eq 1 ]]; then
+			die "站点 $name 已存在。加 --force 覆盖，或 -n <名字> 换个站点名，或先 ${CMD_NAME} remove $name"
+		elif confirm "覆盖已有站点 $name？（旧配置会被替换）" n; then
+			site_teardown "$name" || die "拆除旧站点失败"
+		else
+			die "已取消。可加 -n <名字> 换个站点名，或先 ${CMD_NAME} remove $name"
+		fi
+	fi
 
 	# ---------- 引擎 ----------
 	if [[ -z "$engine" ]]; then
@@ -946,11 +966,6 @@ cmd_add() {
 			fi
 		fi
 	fi
-
-	# ---------- 站点名 ----------
-	[[ -n "$name" ]] || name="$(gen_name_from_domain "$domain")"
-	[[ -n "$name" ]] || name="site"
-	[[ -f "$SITES_DIR/${name}.conf" ]] && die "站点 $name 已存在，先 ${CMD_NAME} remove $name 或换个 --name"
 
 	# ---------- 端口占用 ----------
 	if ! engine_running "$engine"; then
@@ -1191,9 +1206,21 @@ cmd_render() {
 	render_site
 }
 
+# 拆除一个站点的落地物（不动证书、不重载引擎），供 remove 与 add --force 复用
+site_teardown() {
+	local n="$1"
+	[[ -f "$SITES_DIR/${n}.conf" ]] || return 0
+	rm -f "$(caddy_site_path "$n")" "$(nginx_site_path "$n")"
+	rm -f "$NGINX_LOG_DIR/emby-rp-${n}.log" "$NGINX_LOG_DIR/emby-rp-${n}.error.log"
+	rm -f "$CADDY_LOG_DIR/emby-rp-${n}.log" "$CADDY_LOG_DIR/emby-rp-${n}".log.*
+	rm -f "$SITES_DIR/${n}.conf"
+	return 0
+}
+
 cmd_remove() {
 	need_root remove
 	local name="${1:-}" purge_cert=0
+
 	[[ -n "$name" ]] || name="$(pick_site)"
 	load_site "$name" || die "站点不存在：$name"
 	local domain="$SITE_DOMAIN"
@@ -1416,6 +1443,7 @@ add 选项：
       --upstream-insecure        上游证书自签时跳过校验（会自动检测）
       --no-log                   不写访问日志
   -n, --name <名字>              站点名，默认由域名生成
+      --force                    同名站点已存在时直接覆盖（先拆旧配置再建）
   -y, --yes                      全部用默认值，不提问
 
 examples:
