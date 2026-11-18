@@ -115,7 +115,7 @@ emby-rp add -d emby.example.com -e nginx --http2 on -y        # 显式开 HTTP/2
 
 nginx 1.9.5 – 1.31.8 存在 **CVE-2026-123007**：HTTP/2 流控逻辑缺陷，**未认证即可远程执行代码**（修复版本 1.31.9）。Debian/Ubuntu 等发行版包目前多数还没回补。
 
-所以从 1.1.2 开始：
+所以从 1.1.3 开始：
 
 - `--http2` **默认 `off`**，nginx 渲染出的 `listen` 不再带 h2，也不会写 `http2 on;`；
 - caddy 引擎不受影响（走自己的 HTTP/2 实现，与本 CVE 无关）；
@@ -215,7 +215,7 @@ Nginx 站点已经写了 `client_max_body_size 0`；Caddy 没有这个上限。�
 `emby-rp logs <name>` 里有没有真实播放请求，或用 Emby 客户端实测。
 
 **客户端只提 h2，报 `tlsv1 alert no application protocol`？**
-1.1.2 起默认关 HTTP/2，所以只协商 `h2` 时会收到 SSL alert 120，属**预期行为**，不是故障；
+1.1.3 起默认关 HTTP/2，所以只协商 `h2` 时会收到 SSL alert 120，属**预期行为**，不是故障；
 确认 nginx 已 ≥ 1.31.9 后再 `--http2 on` 即可。
 
 **`certbot renew` 会失败吗？**

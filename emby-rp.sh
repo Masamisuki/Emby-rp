@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.1.2"
+VERSION="1.1.3"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
