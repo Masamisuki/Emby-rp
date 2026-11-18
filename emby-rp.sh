@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.7"
+VERSION="1.0.8"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -53,8 +53,7 @@ ask_secret() { local p="$1" a; printf '%s?%s %s: ' "$C_C" "$C_0" "$p" >&2; read 
 confirm() { local p="$1" d="${2:-n}" a; [[ "${EMBY_RP_YES:-0}" == "1" ]] && return 0; a="$(ask "$p (y/N)" "$d")"; [[ "$a" =~ ^[Yy] ]]; }
 
 # ---------- 基础工具 ----------
-need_root() {
-	[[ "${EUID}" -eq 0 ]] || die "需要 root 权限：sudo ${CMD_NAME} $*"
+need_root() {	[[ "${EUID}" -eq 0 ]] || die "需要 root 权限：sudo ${CMD_NAME} $*"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -359,11 +358,16 @@ apply_nginx() {
 }
 
 nginx_listen_ssl_lines() {
-	local v; v="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9][0-9.]*\).*#\1#p')"
+	local v v6=""
+	v="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9][0-9.]*\).*#\1#p')"
+	ipv6_enabled && v6="yes"
 	if [[ -n "$v" ]] && version_ge "$v" "1.25.1"; then
-		printf '    listen %s ssl;\n    http2 on;\n' "$SITE_HTTPS_PORT"
+		printf '    listen %s ssl;\n' "$SITE_HTTPS_PORT"
+		[[ -n "$v6" ]] && printf '    listen [::]:%s ssl;\n' "$SITE_HTTPS_PORT"
+		printf '    http2 on;\n'
 	else
 		printf '    listen %s ssl http2;\n' "$SITE_HTTPS_PORT"
+		[[ -n "$v6" ]] && printf '    listen [::]:%s ssl http2;\n' "$SITE_HTTPS_PORT"
 	fi
 }
 
@@ -601,6 +605,7 @@ render_nginx() {
 	# ---- HTTP server：仅用于 ACME 校验 / 跳转 ----
 	printf 'server {\n'
 	printf '    listen %s;\n' "$SITE_HTTP_PORT"
+	ipv6_enabled && printf '    listen [::]:%s;\n' "$SITE_HTTP_PORT"
 	printf '    server_name %s;\n\n' "$SITE_DOMAIN"
 	printf '    location ^~ /.well-known/acme-challenge/ {\n'
 	printf '        root %s;\n' "$ACME_WEBROOT"
@@ -696,9 +701,15 @@ validate_upstream() {
 	[[ "$u" =~ ^https?://[^/[:space:]]+ ]] || die "源站格式不对：$u（例：https://stream-1.example.com 或 http://127.0.0.1:8096）"
 }
 
+# 系统是否开了 IPv6（开了才监听 [::]）
+ipv6_enabled() {
+	local d
+	d="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"
+	[[ "$d" == "0" ]]
+}
+
 # 从 upstream URL 取纯主机名（无协议/路径/端口）
-upstream_host_only() {
-	local h="${1#*://}"
+upstream_host_only() {	local h="${1#*://}"
 	h="${h%%/*}"
 	case "$h" in
 		*:* ) h="${h%:*}" ;;
@@ -831,6 +842,7 @@ nginx_acme_prepare() {
 		SITE_HEAD_COMMENT
 		printf 'server {\n'
 		printf '    listen %s;\n' "$SITE_HTTP_PORT"
+		ipv6_enabled && printf '    listen [::]:%s;\n' "$SITE_HTTP_PORT"
 		printf '    server_name %s;\n\n' "$SITE_DOMAIN"
 		printf '    location ^~ /.well-known/acme-challenge/ {\n'
 		printf '        root %s;\n' "$ACME_WEBROOT"
@@ -853,6 +865,7 @@ cert_obtain_nginx() {
 	printf '%s\n' "$out" | sed 's/^/    /'
 	if [[ $rc -ne 0 ]]; then
 		err "证书签发失败。常见原因：域名未解析到本机、80 端口不通、CDN 未放行 /.well-known。"
+		err "如果报错里出现 IPv6 地址（如 2400:...），检查域名的 AAAA 记录：要么让本机 nginx 监听 [::]:80（新版已默认加上），要么暂时删掉 AAAA 记录重试。"
 		return 1
 	fi
 	[[ -f "/etc/letsencrypt/live/${SITE_DOMAIN}/fullchain.pem" ]]
