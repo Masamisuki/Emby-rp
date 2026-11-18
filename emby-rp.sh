@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.1.1"
+VERSION="1.1.2"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -824,10 +824,12 @@ self_install() {
 		fi
 	fi
 
-	# 快捷入口：emby -> emby-rp（不覆盖别人的同名命令）
+	# 快捷入口：emby -> emby-rp（不覆盖已有同名命令，包括指向别处的软链）
 	if [[ -f "$BIN_PATH" && "$ALIAS_PATH" != "$BIN_PATH" ]]; then
 		if [[ -L "$ALIAS_PATH" ]]; then
-			[[ "$(readlink "$ALIAS_PATH" 2>/dev/null)" == "$BIN_PATH" ]] || ln -sfn "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
+			if [[ "$(readlink "$ALIAS_PATH" 2>/dev/null)" != "$BIN_PATH" ]]; then
+				[[ "$quiet" == "quiet" ]] || warn "快捷命令 $ALIAS_PATH 已存在且指向别处，未覆盖。"
+			fi
 		elif [[ ! -e "$ALIAS_PATH" ]]; then
 			ln -s "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
 		fi
@@ -882,12 +884,20 @@ cert_obtain_nginx() {
 cmd_add() {
 	local interactive=0
 	[[ $# -eq 0 ]] && interactive=1
+	OVERWRITE_BACKUP_DIR=""  # 本次 add 的旧站备份目录（菜单里连用两次时不串）
 
 	local domain="" engine="" mode="" prefix="" strip="0" frontend="" upstream=""
 	local tls="" cert="" key="" email="" name="" http_port="" https_port=""
 	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value="" rewrites=""
 
 	while [[ $# -gt 0 ]]; do
+		# 需要值的选项放在最后且没给值时，shift 2 会失败且不移动，导致无限循环
+		case "$1" in
+			-d|--domain|-e|--engine|-m|--mode|-p|--prefix|-F|--frontend|-u|--upstream|\
+			--tls|--cert|--key|--email|-n|--name|--http-port|--https-port|\
+			--host-mode|--upstream-host|-R|--rewrite)
+				[[ $# -ge 2 ]] || die "选项 $1 缺少参数值" ;;
+		esac
 		case "$1" in
 			-d|--domain)   domain="${2:-}"; shift 2 ;;
 			-e|--engine)   engine="${2:-}"; shift 2 ;;
@@ -1133,6 +1143,9 @@ cmd_add() {
 	if [[ "$tls" == "auto" && "$engine" == "nginx" ]]; then
 		if ! cert_obtain_nginx "$email"; then
 			rm -f "$SITES_DIR/${name}.conf" "$(nginx_site_path "$name")"
+			if site_restore_overwrite "$name"; then
+				die "证书签发失败，覆盖前的旧站点已恢复。"
+			fi
 			apply_nginx >/dev/null 2>&1 || true
 			die "证书签发失败，已删除站点记录与临时 HTTP 配置。"
 		fi
@@ -1142,6 +1155,9 @@ cmd_add() {
 	# ---------- 落地 ----------
 	if ! site_apply; then
 		rm -f "$SITES_DIR/${name}.conf"
+		if site_restore_overwrite "$name"; then
+			die "新配置未生效，覆盖前的旧站点已恢复。"
+		fi
 		die "站点未写入，已回滚。"
 	fi
 
@@ -1330,10 +1346,18 @@ cmd_render() {
 	render_site
 }
 
-# 拆除一个站点的落地物（不动证书、不重载引擎），供 remove 与 add --force 复用
+# 拆除一个站点的落地物（不动证书、不重载引擎），供 add --force 复用。
+# 拆除前先把旧站备份到 $BACKUP_DIR，add 失败时可由 site_restore_overwrite 恢复；
+# 备份目录记在 OVERWRITE_BACKUP_DIR（cmd_add 开头会清空，避免菜单里连用两次串了）。
 site_teardown() {
 	local n="$1"
 	[[ -f "$SITES_DIR/${n}.conf" ]] || return 0
+	local bd="$BACKUP_DIR/overwrite-${n}.$(date +%Y%m%d-%H%M%S)"
+	mkdir -p "$bd" 2>/dev/null || true
+	cp -a "$SITES_DIR/${n}.conf" "$bd/" 2>/dev/null || true
+	[[ -f "$(caddy_site_path "$n")" ]] && cp -a "$(caddy_site_path "$n")" "$bd/" 2>/dev/null || true
+	[[ -f "$(nginx_site_path "$n")" ]] && cp -a "$(nginx_site_path "$n")" "$bd/" 2>/dev/null || true
+	OVERWRITE_BACKUP_DIR="$bd"
 	rm -f "$(caddy_site_path "$n")" "$(nginx_site_path "$n")"
 	rm -f "$NGINX_LOG_DIR/emby-rp-${n}.log" "$NGINX_LOG_DIR/emby-rp-${n}.error.log"
 	rm -f "$CADDY_LOG_DIR/emby-rp-${n}.log" "$CADDY_LOG_DIR/emby-rp-${n}".log.*
@@ -1378,6 +1402,22 @@ cmd_remove() {
 		fi
 	fi
 	[[ "$domain" == "" ]] || true
+}
+
+# 恢复 --force 覆盖前备份的旧站（add 失败时调用；无备份返回 1）
+site_restore_overwrite() {
+	local n="$1" bd="${OVERWRITE_BACKUP_DIR:-}"
+	[[ -n "$bd" && -d "$bd" && -f "$bd/${n}.conf" ]] || return 1
+	local eng
+	eng="$(sed -n 's/^SITE_ENGINE=//p' "$bd/${n}.conf" 2>/dev/null | tr -d "'\"" | head -n1)"
+	cp -a "$bd/${n}.conf" "$SITES_DIR/${n}.conf" 2>/dev/null
+	[[ -f "$bd/${n}.caddy" ]] && cp -a "$bd/${n}.caddy" "$(caddy_site_path "$n")" 2>/dev/null
+	[[ -f "$bd/emby-rp-${n}.conf" ]] && cp -a "$bd/emby-rp-${n}.conf" "$(nginx_site_path "$n")" 2>/dev/null
+	case "$eng" in
+		caddy) apply_caddy >/dev/null 2>&1 || true ;;
+		nginx) apply_nginx >/dev/null 2>&1 || true ;;
+	esac
+	return 0
 }
 
 # =============================================================================
