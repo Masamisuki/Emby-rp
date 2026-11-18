@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.8"
+VERSION="1.0.9"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -904,7 +904,17 @@ cmd_add() {
 			--no-log)      access_log="0"; shift ;;
 			--host-mode)   host_mode="${2:-}"; shift 2 ;;
 			--upstream-host) host_mode="value"; host_value="${2:-}"; shift 2 ;;
-			-R|--rewrite)  rewrites="${rewrites:+$rewrites }${2:-}"; shift 2 ;;
+			-R|--rewrite)
+				local rv="${2:-}" rn="${3:-}"
+				if [[ "$rn" != "" && "$rn" != -* ]]; then
+					rv="$rv=>$rn"; shift 3
+				else
+					shift 2
+				fi
+				case "$rv" in
+					*=) die "--rewrite 参数被 shell 当成重定向了（末尾的 = 后面那个 > 被吃掉了）。用引号包起来：--rewrite 'old.com=>new.com'" ;;
+				esac
+				rewrites="${rewrites:+$rewrites }$rv" ;;
 			--force)       force=1; shift ;;
 			-y|--yes)      yes=1; shift ;;
 			-h|--help)     usage; return 0 ;;
