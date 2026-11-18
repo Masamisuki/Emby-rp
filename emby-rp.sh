@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -546,6 +546,8 @@ nginx_proxy_common() {
 			to="${pair#*=>}"
 			[[ -n "$from" ]] || continue
 			printf "%ssub_filter '%s' '%s';\n" "$ind" "$from" "$to"
+			# 同一域名出现在 302 Location 里时也得换，否则客户端会追到原域名
+			printf '%sproxy_redirect ~^https?://%s(.*)$ https://%s$1;\n' "$ind" "$(printf '%s' "$from" | sed 's/\./\\./g')" "$to"
 		done
 		printf '%ssub_filter_once off;\n' "$ind"
 		printf '%ssub_filter_types *;\n' "$ind"
