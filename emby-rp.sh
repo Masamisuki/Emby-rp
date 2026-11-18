@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.4"
+VERSION="1.0.5"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -677,7 +677,21 @@ validate_prefix() {
 
 validate_upstream() {
 	local u="$1"
-	[[ "$u" =~ ^https?://[^/[:space:]]+ ]] || die "源站必须是 http(s)://host[:port] 形式：$u"
+	[[ "$u" =~ ^https?://[^/[:space:]]+ ]] || die "源站格式不对：$u（例：https://stream-1.example.com 或 http://127.0.0.1:8096）"
+}
+
+# 没写协议时自动补：无端口或 :443 → https，其它端口 → http
+normalize_upstream() {
+	local u="$1" hostport
+	case "$u" in
+		http://*|https://*) printf '%s' "$u"; return 0 ;;
+	esac
+	hostport="${u%%/*}"
+	if [[ "$hostport" == *:* && "$hostport" != *:443 ]]; then
+		printf 'http://%s' "$u"
+	else
+		printf 'https://%s' "$u"
+	fi
 }
 
 site_public_base() {
@@ -908,7 +922,7 @@ cmd_add() {
 	if [[ -z "$mode" ]]; then
 		mode="standalone"
 		if [[ $yes -eq 0 ]]; then
-			printf '  1) 独立反代     %s域名根路径就是 Emby（含官方 Web UI）%s\n' "$C_D" "$C_0" >&2
+			printf '  1) 独立反代     %s域名根路径就是 Emby（反代别人的 Emby / 推流域名选这个）%s\n' "$C_D" "$C_0" >&2
 			printf '  2) 前后端分离   %s根路径给前端，/前缀 回源 Emby 后端%s\n' "$C_D" "$C_0" >&2
 			pick="$(ask "选择模式" "1")"
 			case "$pick" in
@@ -954,6 +968,7 @@ cmd_add() {
 		fi
 	fi
 	upstream="$(strip_trailing_slash "$upstream")"
+	upstream="$(normalize_upstream "$upstream")"
 	validate_upstream "$upstream"
 
 	# ---------- TLS ----------
@@ -1475,7 +1490,8 @@ add 选项：
   -p, --prefix </emby>           split 模式对外前缀，默认 /emby
       --keep / --strip           split 模式是否保留前缀，默认 keep
   -F, --frontend <dir:/path|URL> split 模式的前端位置
-  -u, --upstream <URL>           后端，默认 http://127.0.0.1:8096
+      -u, --upstream <URL>           后端，默认 http://127.0.0.1:8096
+                                     可省略协议与端口：stream-1.example.com → https://stream-1.example.com:443
       --tls auto|file|none       默认 auto
       --cert <路径> --key <路径>  tls=file 时必填
       --email <邮箱>             ACME 联系邮箱
