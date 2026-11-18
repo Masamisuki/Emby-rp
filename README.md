@@ -41,7 +41,13 @@ curl -fsSL -o /root/emby-rp.sh https://raw.githubusercontent.com/Masamisuki/Emby
 bash /root/emby-rp.sh menu        # 交互菜单
 ```
 
-第一次 `add` 会自动装好所选引擎（caddy 或 nginx）、拷到 `/usr/local/bin/emby-rp`、注册 systemd 服务，之后直接 `emby-rp` 就行。
+第一次 `add` 会自动装好所选引擎（caddy 或 nginx）、拷到 `/usr/local/bin/emby-rp`、建快捷命令 `/usr/local/bin/emby`（指向同上）、签证书，之后直接用 `emby` 就行：
+
+```bash
+emby            # 无参数 = 交互菜单
+emby list       # 列站点
+emby check      # 链路自检
+```
 
 首次使用建议先跑菜单里的「新建站点」，向导会问完所有参数。
 
@@ -133,6 +139,7 @@ emby-rp menu | --help
 | 路径 | 用途 |
 |---|---|
 | `/usr/local/bin/emby-rp` | 脚本本体 |
+| `/usr/local/bin/emby` | 快捷入口（指向 `emby-rp`，不覆盖已有同名命令） |
 | `/etc/emby-rp/sites/<name>.conf` | 站点元数据 |
 | `/etc/emby-rp/sites/<name>.caddy` | Caddy 站点片段 |
 | `/etc/nginx/conf.d/emby-rp-<name>.conf` | Nginx 站点配置（含 `map $http_upgrade`，必须在 `http` 上下文） |

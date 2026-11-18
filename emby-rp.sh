@@ -15,12 +15,14 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.3"
+VERSION="1.0.4"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
 BACKUP_DIR="$CONF_DIR/backups"
 BIN_PATH="/usr/local/bin/${CMD_NAME}"
+ALIAS_NAME="emby"
+ALIAS_PATH="/usr/local/bin/${ALIAS_NAME}"
 STATE_FILE="$CONF_DIR/self.state"
 ACME_WEBROOT="/var/www/emby-rp-acme"
 
@@ -752,19 +754,31 @@ site_apply() {
 }
 
 self_install() {
-	local src="$0" quiet="${1:-}"
+	local src="$0" quiet="${1:-}" installed=0 cur
 	[[ -f "$src" ]] || return 0
 	src="$(cd "$(dirname "$src")" 2>/dev/null && pwd)/$(basename "$src")"
 	[[ -n "$src" && "$src" == *"/"* ]] || return 0
-	if [[ -f "$BIN_PATH" ]]; then
-		local old
-		old="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$BIN_PATH" 2>/dev/null | head -n1)"
-		[[ "$old" == "$VERSION" ]] && return 0
+
+	cur="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$BIN_PATH" 2>/dev/null | head -n1)"
+	if [[ ! -f "$BIN_PATH" || "$cur" != "$VERSION" ]]; then
+		mkdir -p "$(dirname "$BIN_PATH")" 2>/dev/null || return 0
+		if cp -f "$src" "$BIN_PATH" 2>/dev/null; then
+			chmod 755 "$BIN_PATH" 2>/dev/null || true
+			installed=1
+		fi
 	fi
-	mkdir -p "$(dirname "$BIN_PATH")" 2>/dev/null || return 0
-	if cp -f "$src" "$BIN_PATH" 2>/dev/null; then
-		chmod 755 "$BIN_PATH" 2>/dev/null || true
-		[[ "$quiet" == "quiet" ]] || info "已装到 $BIN_PATH（版本 v$VERSION，以后直接执行 ${CMD_NAME}）"
+
+	# 快捷入口：emby -> emby-rp（不覆盖别人的同名命令）
+	if [[ -f "$BIN_PATH" && "$ALIAS_PATH" != "$BIN_PATH" ]]; then
+		if [[ -L "$ALIAS_PATH" ]]; then
+			[[ "$(readlink "$ALIAS_PATH" 2>/dev/null)" == "$BIN_PATH" ]] || ln -sfn "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
+		elif [[ ! -e "$ALIAS_PATH" ]]; then
+			ln -s "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
+		fi
+	fi
+
+	if [[ $installed -eq 1 ]]; then
+		[[ "$quiet" == "quiet" ]] || info "已装到 $BIN_PATH（v$VERSION），快捷命令：${ALIAS_NAME}"
 	fi
 	return 0
 }
@@ -1314,6 +1328,9 @@ residue_audit() {
 		local left; left="$(ls -A /var/log/caddy 2>/dev/null | head -5 | tr '\n' ' ')"
 		[[ -n "$left" ]] && info "/var/log/caddy 还有其它内容：$left"
 	fi
+	if [[ -e "$ALIAS_PATH" || -L "$ALIAS_PATH" ]]; then
+		warn "快捷命令仍在：$ALIAS_PATH -> $(readlink "$ALIAS_PATH" 2>/dev/null || printf '非链接')"
+	fi
 	if [[ -d /var/www/html ]] && [[ -f /var/www/html/index.html ]]; then
 		info "/var/www/html 存在（前端目录，常为系统自带，未动）"
 	fi
@@ -1385,7 +1402,8 @@ cmd_uninstall() {
 	# 4) 目录与二进制
 	rm -rf "$CONF_DIR" "$ACME_WEBROOT"
 	rm -f "$BIN_PATH"
-	ok "已删除 $CONF_DIR / $ACME_WEBROOT / $BIN_PATH"
+	if [[ -L "$ALIAS_PATH" && "$(readlink "$ALIAS_PATH" 2>/dev/null)" == "$BIN_PATH" ]]; then rm -f "$ALIAS_PATH"; fi
+	ok "已删除 $CONF_DIR / $ACME_WEBROOT / $BIN_PATH / $ALIAS_PATH"
 
 	# 5) 重载引擎
 	if engine_running caddy; then systemctl reload caddy >/dev/null 2>&1 || true; fi
@@ -1439,6 +1457,7 @@ ${CMD_NAME} ${VERSION} — Emby / Jellyfin 反向代理管理器
 用法： ${CMD_NAME} <命令> [选项]
 
 命令：
+  （直接敲 ${ALIAS_NAME} 也能进菜单：${ALIAS_NAME} = ${CMD_NAME} 的快捷入口）
   add        新建站点（不带参数进入向导）
   list       列出站点
   status     查看站点详情        $ ${CMD_NAME} status [name]
@@ -1447,7 +1466,7 @@ ${CMD_NAME} ${VERSION} — Emby / Jellyfin 反向代理管理器
   render     只打印渲染结果，不写文件
   remove     删除站点            $ ${CMD_NAME} remove <name>
   uninstall  彻底卸载（含残留自检）
-  menu       交互菜单
+  menu       交互菜单（直接执行 ${CMD_NAME} / ${ALIAS_NAME} 无参数也是这个）
 
 add 选项：
   -d, --domain <域名>            主域名（必填）
@@ -1530,6 +1549,9 @@ menu() {
 main() {
 	local cmd="${1:-}"
 	[[ $# -gt 0 ]] && shift
+
+	# root 下每次执行都确保命令已安装 / 已升级（静默）
+	[[ "$(id -u)" == "0" ]] && self_install quiet
 	case "$cmd" in
 		add|new)          cmd_add "$@" ;;
 		list|ls)          cmd_list ;;
