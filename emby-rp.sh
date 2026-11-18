@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.1"
+VERSION="1.0.2"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -739,15 +739,19 @@ site_apply() {
 }
 
 self_install() {
-	[[ -f "$BIN_PATH" ]] && return 0
-	local src="$0"
+	local src="$0" quiet="${1:-}"
 	[[ -f "$src" ]] || return 0
 	src="$(cd "$(dirname "$src")" 2>/dev/null && pwd)/$(basename "$src")"
 	[[ -n "$src" && "$src" == *"/"* ]] || return 0
+	if [[ -f "$BIN_PATH" ]]; then
+		local old
+		old="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$BIN_PATH" 2>/dev/null | head -n1)"
+		[[ "$old" == "$VERSION" ]] && return 0
+	fi
 	mkdir -p "$(dirname "$BIN_PATH")" 2>/dev/null || return 0
 	if cp -f "$src" "$BIN_PATH" 2>/dev/null; then
 		chmod 755 "$BIN_PATH" 2>/dev/null || true
-		info "已安装到 $BIN_PATH（以后直接执行 ${CMD_NAME}）"
+		[[ "$quiet" == "quiet" ]] || info "已装到 $BIN_PATH（版本 v$VERSION，以后直接执行 ${CMD_NAME}）"
 	fi
 	return 0
 }
@@ -1042,6 +1046,7 @@ cmd_add() {
 		printf '   模式       独立反代（整站）\n'
 	fi
 	printf '\n'
+	self_install
 	info "自检：${CMD_NAME} check ${name}"
 	return 0
 }
