@@ -36,9 +36,12 @@
 不需要安装，`bash emby-rp.sh` 就能跑；第一次 `add` 会自动把自身复制到 `/usr/local/bin/emby-rp`。
 
 ```bash
-curl -fsSL -o /root/emby-rp.sh https://example.com/emby-rp.sh   # 或自己 scp 上去
+# 拉脚本（Debian / Ubuntu，root）
+curl -fsSL -o /root/emby-rp.sh https://raw.githubusercontent.com/Masamisuki/Emby-rp/main/emby-rp.sh
 bash /root/emby-rp.sh menu        # 交互菜单
 ```
+
+第一次 `add` 会自动装好所选引擎（caddy 或 nginx）、拷到 `/usr/local/bin/emby-rp`、注册 systemd 服务，之后直接 `emby-rp` 就行。
 
 首次使用建议先跑菜单里的「新建站点」，向导会问完所有参数。
 
