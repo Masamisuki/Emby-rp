@@ -8,7 +8,7 @@
 #   1. split 模式默认「不剥前缀」(keep)：源站 Emby 的 Base URL 设为 /emby，
 #      官方 Web UI / WebSocket / 图片 / HLS 全部自带前缀，不会出现半残状态。
 #      需要兼容 Base URL 留空的后端时用 --strip。
-#   2. /emby 前缀可以随便用。
+#   2. /emby 前缀可以随便用（对比 wuuduf/emby-proxy 会直接 die）。
 #   3. 所有落地物登记在 /etc/emby-rp 下，uninstall 按清单清除并自检残留。
 #   4. 不使用 set -e，避免单条命令失败导致半途退出留下残局。
 # =============================================================================
@@ -116,6 +116,7 @@ reset_site_vars() {
 	SITE_TLS="auto"; SITE_CERT=""; SITE_KEY=""; SITE_EMAIL=""
 	SITE_HTTP_PORT="80"; SITE_HTTPS_PORT="443"
 	SITE_CF=0; SITE_UPSTREAM_INSECURE=0; SITE_ACCESS_LOG=1
+	SITE_HTTP2="off"
 	SITE_HOST_MODE="upstream"; SITE_HOST_VALUE=""; SITE_REWRITES=""
 	SITE_CREATED=""; FRONTEND_CREATED=0
 }
@@ -151,6 +152,7 @@ save_site() {
 		printf 'SITE_EMAIL=%q\n'     "$SITE_EMAIL"
 		printf 'SITE_HTTP_PORT=%q\n' "$SITE_HTTP_PORT"
 		printf 'SITE_HTTPS_PORT=%q\n' "$SITE_HTTPS_PORT"
+		printf 'SITE_HTTP2=%q\n'    "${SITE_HTTP2:-off}"
 		printf 'SITE_CF=%q\n'        "$SITE_CF"
 		printf 'SITE_UPSTREAM_INSECURE=%q\n' "$SITE_UPSTREAM_INSECURE"
 		printf 'SITE_ACCESS_LOG=%q\n' "$SITE_ACCESS_LOG"
@@ -358,16 +360,20 @@ apply_nginx() {
 }
 
 nginx_listen_ssl_lines() {
-	local v v6=""
+	local v v6="" h2=""
 	v="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9][0-9.]*\).*#\1#p')"
 	ipv6_enabled && v6="yes"
+	[[ "${SITE_HTTP2:-off}" == "on" ]] && h2="yes"
 	if [[ -n "$v" ]] && version_ge "$v" "1.25.1"; then
 		printf '    listen %s ssl;\n' "$SITE_HTTPS_PORT"
 		[[ -n "$v6" ]] && printf '    listen [::]:%s ssl;\n' "$SITE_HTTPS_PORT"
-		printf '    http2 on;\n'
-	else
+		[[ -n "$h2" ]] && printf '    http2 on;\n'
+	elif [[ -n "$h2" ]]; then
 		printf '    listen %s ssl http2;\n' "$SITE_HTTPS_PORT"
 		[[ -n "$v6" ]] && printf '    listen [::]:%s ssl http2;\n' "$SITE_HTTPS_PORT"
+	else
+		printf '    listen %s ssl;\n' "$SITE_HTTPS_PORT"
+		[[ -n "$v6" ]] && printf '    listen [::]:%s ssl;\n' "$SITE_HTTPS_PORT"
 	fi
 }
 
@@ -386,6 +392,7 @@ SITE_HEAD_COMMENT() {
 			"$([[ "$SITE_STRIP" == "1" ]] && printf 'strip 前缀被剥离' || printf 'keep 前缀保留')"
 	fi
 	printf '# tls:      %s\n' "$SITE_TLS"
+	[[ "$SITE_ENGINE" == "nginx" ]] && printf '# http2:    %s\n' "${SITE_HTTP2:-off}"
 	printf '# generated: %s\n' "$(date '+%F %T')"
 	printf '# 手工修改会在下一次 add/remove 时被覆盖\n'
 	printf '# ---------------------------------------------------------------\n'
@@ -824,12 +831,10 @@ self_install() {
 		fi
 	fi
 
-	# 快捷入口：emby -> emby-rp（不覆盖已有同名命令，包括指向别处的软链）
+	# 快捷入口：emby -> emby-rp（不覆盖别人的同名命令）
 	if [[ -f "$BIN_PATH" && "$ALIAS_PATH" != "$BIN_PATH" ]]; then
 		if [[ -L "$ALIAS_PATH" ]]; then
-			if [[ "$(readlink "$ALIAS_PATH" 2>/dev/null)" != "$BIN_PATH" ]]; then
-				[[ "$quiet" == "quiet" ]] || warn "快捷命令 $ALIAS_PATH 已存在且指向别处，未覆盖。"
-			fi
+			[[ "$(readlink "$ALIAS_PATH" 2>/dev/null)" == "$BIN_PATH" ]] || ln -sfn "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
 		elif [[ ! -e "$ALIAS_PATH" ]]; then
 			ln -s "$BIN_PATH" "$ALIAS_PATH" 2>/dev/null || true
 		fi
@@ -884,20 +889,12 @@ cert_obtain_nginx() {
 cmd_add() {
 	local interactive=0
 	[[ $# -eq 0 ]] && interactive=1
-	OVERWRITE_BACKUP_DIR=""  # 本次 add 的旧站备份目录（菜单里连用两次时不串）
 
 	local domain="" engine="" mode="" prefix="" strip="0" frontend="" upstream=""
 	local tls="" cert="" key="" email="" name="" http_port="" https_port=""
-	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value="" rewrites=""
+	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value="" rewrites="" http2=""
 
 	while [[ $# -gt 0 ]]; do
-		# 需要值的选项放在最后且没给值时，shift 2 会失败且不移动，导致无限循环
-		case "$1" in
-			-d|--domain|-e|--engine|-m|--mode|-p|--prefix|-F|--frontend|-u|--upstream|\
-			--tls|--cert|--key|--email|-n|--name|--http-port|--https-port|\
-			--host-mode|--upstream-host|-R|--rewrite)
-				[[ $# -ge 2 ]] || die "选项 $1 缺少参数值" ;;
-		esac
 		case "$1" in
 			-d|--domain)   domain="${2:-}"; shift 2 ;;
 			-e|--engine)   engine="${2:-}"; shift 2 ;;
@@ -914,6 +911,12 @@ cmd_add() {
 			-n|--name)     name="${2:-}"; shift 2 ;;
 			--http-port)   http_port="${2:-}"; shift 2 ;;
 			--https-port)  https_port="${2:-}"; shift 2 ;;
+			--http2)
+				http2="${2:-}"
+				case "$http2" in
+					on|off) shift 2 ;;
+					*) die "--http2 只能是 on 或 off（当前 HTTP/2 有未认证 RCE 风险，默认 off）" ;;
+				esac ;;
 			--cf)          cf="1"; shift ;;
 			--upstream-insecure) insecure="1"; shift ;;
 			--no-log)      access_log="0"; shift ;;
@@ -1121,6 +1124,7 @@ cmd_add() {
 	SITE_CF="$cf"
 	SITE_UPSTREAM_INSECURE="$insecure"
 	SITE_ACCESS_LOG="$access_log"
+	SITE_HTTP2="${http2:-off}"
 	SITE_HOST_MODE="${host_mode:-upstream}"
 	SITE_HOST_VALUE="$host_value"
 	# --rewrite from[=>to]，只写 from 时换成本站域名
@@ -1143,9 +1147,6 @@ cmd_add() {
 	if [[ "$tls" == "auto" && "$engine" == "nginx" ]]; then
 		if ! cert_obtain_nginx "$email"; then
 			rm -f "$SITES_DIR/${name}.conf" "$(nginx_site_path "$name")"
-			if site_restore_overwrite "$name"; then
-				die "证书签发失败，覆盖前的旧站点已恢复。"
-			fi
 			apply_nginx >/dev/null 2>&1 || true
 			die "证书签发失败，已删除站点记录与临时 HTTP 配置。"
 		fi
@@ -1155,9 +1156,6 @@ cmd_add() {
 	# ---------- 落地 ----------
 	if ! site_apply; then
 		rm -f "$SITES_DIR/${name}.conf"
-		if site_restore_overwrite "$name"; then
-			die "新配置未生效，覆盖前的旧站点已恢复。"
-		fi
 		die "站点未写入，已回滚。"
 	fi
 
@@ -1234,6 +1232,13 @@ cmd_status() {
 	printf '  TLS         %s\n' "$SITE_TLS"
 	printf '  证书到期    %s\n' "$(cert_expiry_of "$cpath")"
 	printf '  监听        %s / %s\n' "$SITE_HTTP_PORT" "$SITE_HTTPS_PORT"
+	if [[ "$SITE_ENGINE" == "nginx" && "$SITE_TLS" != "none" ]]; then
+		if [[ "${SITE_HTTP2:-off}" == "on" ]]; then
+			printf '  HTTP/2      on（注意：nginx 1.9.5–1.31.8 有 CVE-2026-123007 未认证 RCE）\n'
+		else
+			printf '  HTTP/2      off\n'
+		fi
+	fi
 	printf '  配置文件    %s\n' "$cfg"
 	printf '  创建时间    %s\n' "${SITE_CREATED:-—}"
 	hr
@@ -1346,18 +1351,10 @@ cmd_render() {
 	render_site
 }
 
-# 拆除一个站点的落地物（不动证书、不重载引擎），供 add --force 复用。
-# 拆除前先把旧站备份到 $BACKUP_DIR，add 失败时可由 site_restore_overwrite 恢复；
-# 备份目录记在 OVERWRITE_BACKUP_DIR（cmd_add 开头会清空，避免菜单里连用两次串了）。
+# 拆除一个站点的落地物（不动证书、不重载引擎），供 remove 与 add --force 复用
 site_teardown() {
 	local n="$1"
 	[[ -f "$SITES_DIR/${n}.conf" ]] || return 0
-	local bd="$BACKUP_DIR/overwrite-${n}.$(date +%Y%m%d-%H%M%S)"
-	mkdir -p "$bd" 2>/dev/null || true
-	cp -a "$SITES_DIR/${n}.conf" "$bd/" 2>/dev/null || true
-	[[ -f "$(caddy_site_path "$n")" ]] && cp -a "$(caddy_site_path "$n")" "$bd/" 2>/dev/null || true
-	[[ -f "$(nginx_site_path "$n")" ]] && cp -a "$(nginx_site_path "$n")" "$bd/" 2>/dev/null || true
-	OVERWRITE_BACKUP_DIR="$bd"
 	rm -f "$(caddy_site_path "$n")" "$(nginx_site_path "$n")"
 	rm -f "$NGINX_LOG_DIR/emby-rp-${n}.log" "$NGINX_LOG_DIR/emby-rp-${n}.error.log"
 	rm -f "$CADDY_LOG_DIR/emby-rp-${n}.log" "$CADDY_LOG_DIR/emby-rp-${n}".log.*
@@ -1402,22 +1399,6 @@ cmd_remove() {
 		fi
 	fi
 	[[ "$domain" == "" ]] || true
-}
-
-# 恢复 --force 覆盖前备份的旧站（add 失败时调用；无备份返回 1）
-site_restore_overwrite() {
-	local n="$1" bd="${OVERWRITE_BACKUP_DIR:-}"
-	[[ -n "$bd" && -d "$bd" && -f "$bd/${n}.conf" ]] || return 1
-	local eng
-	eng="$(sed -n 's/^SITE_ENGINE=//p' "$bd/${n}.conf" 2>/dev/null | tr -d "'\"" | head -n1)"
-	cp -a "$bd/${n}.conf" "$SITES_DIR/${n}.conf" 2>/dev/null
-	[[ -f "$bd/${n}.caddy" ]] && cp -a "$bd/${n}.caddy" "$(caddy_site_path "$n")" 2>/dev/null
-	[[ -f "$bd/emby-rp-${n}.conf" ]] && cp -a "$bd/emby-rp-${n}.conf" "$(nginx_site_path "$n")" 2>/dev/null
-	case "$eng" in
-		caddy) apply_caddy >/dev/null 2>&1 || true ;;
-		nginx) apply_nginx >/dev/null 2>&1 || true ;;
-	esac
-	return 0
 }
 
 # =============================================================================
@@ -1609,6 +1590,7 @@ add 选项：
       --cert <路径> --key <路径>  tls=file 时必填
       --email <邮箱>             ACME 联系邮箱
       --http-port <端口> --https-port <端口>
+      --http2 on|off             仅 nginx，默认 off（CVE-2026-123007）
       --cf                       前端走 Cloudflare（从 Cf-Connecting-IP 取真实 IP）
       --upstream-insecure        上游证书自签时跳过校验（会自动检测）
       --upstream-host <host>     传给上游的 Host 头（默认自动用上游自身域名，不带端口）

@@ -12,6 +12,25 @@
 
 ---
 
+## 为什么不用现成的 `wuuduf/emby-proxy`
+
+那个脚本能跑，但它把「前后端分离」当成窄路走，有几处硬限制：
+
+1. `path` 模式**禁止**使用 `/emby`、`/emby/*`、`/web`、`/.well-known`、`/_emby_proxy_health` 作为前缀，直接 `die`。
+2. 非根路径一律**剥前缀**回源（`handle_path` / `location ^~ … proxy_pass upstream/`），所以后端 Emby 的 Base URL 必须留空。
+3. 它只重写 `Location` / `Content-Location` 响应头，**不重写 body**。Emby 官方 Web UI 里塞满了绝对路径 `/web/index.html`、`/embywebsocket`，一旦套在 `/foo/` 下面，播放页、图片、字幕就半残。
+4. `subdomain` / `port` 模式只允许一个根上游，想做「根给前端、前缀给后端」得先落到 `path` 模式，再撞上面第 2 条的墙。
+
+`emby-rp` 的处理方式：
+
+- **默认「不剥前缀」（keep）**：`/emby/xxx` 原样转给后端，同时把 Emby 的 `Base URL` 设成 `/emby`。
+  Emby 会自己在所有 URL 前面加 `/emby`，官方 Web UI、`/emby/embywebsocket`、图片、HLS 切片全部自洽，不会出现半残。
+- **`--strip` 只作为兼容开关**：后端是别人的、动不了 Base URL 时才用。
+- **`/emby` 随便用**，只禁止 `/`、`/.well-known`、`/_emby_rp_health`（这三个真会和内置逻辑打架）。
+- 所有落地物登记在 `/etc/emby-rp`，`uninstall` 按清单清除，结束后自动做**残留自检**。
+
+---
+
 ## 安装 / 运行
 
 不需要安装，`bash emby-rp.sh` 就能跑；第一次 `add` 会自动把自身复制到 `/usr/local/bin/emby-rp`。
@@ -89,7 +108,34 @@ emby-rp add -d emby.example.com --tls none --http-port 8080 -y # 纯 HTTP，内�
 emby-rp add -d emby.example.com --upstream-insecure -y        # 后端是自签 https（会尝试自动识别）
 emby-rp add -d emby.example.com --cf -y                       # 前面挂 Cloudflare，取 Cf-Connecting-IP
 emby-rp add -d emby.example.com --no-log -y                   # 不写访问日志
+emby-rp add -d emby.example.com -e nginx --http2 on -y        # 显式开 HTTP/2（默认关，见下）
 ```
+
+### HTTP/2 默认是关的（安全考虑）
+
+nginx 1.9.5 – 1.31.8 存在 **CVE-2026-123007**：HTTP/2 流控逻辑缺陷，**未认证即可远程执行代码**（修复版本 1.31.9）。Debian/Ubuntu 等发行版包目前多数还没回补。
+
+所以从 1.1.2 开始：
+
+- `--http2` **默认 `off`**，nginx 渲染出的 `listen` 不再带 h2，也不会写 `http2 on;`；
+- caddy 引擎不受影响（走自己的 HTTP/2 实现，与本 CVE 无关）；
+- 升级前建的老站点元数据里没有 `SITE_HTTP2` 键，重渲染时按 `off` 兜底，**顺手把隐患关掉**；
+- `emby-rp status <name>` 会多打一行 `HTTP/2 on/off`，开的时候附带 CVE 提示。
+
+确认自己的 nginx 已经是 1.31.9+ 再开：
+
+```bash
+nginx -v                                   # 看版本
+emby-rp add -d emby.example.com -e nginx --http2 on -y
+```
+
+自查某个域名当前还能不能协商 h2（输出 `No ALPN negotiated` 就是已关闭）：
+
+```bash
+openssl s_client -connect emby.example.com:443 -servername emby.example.com -alpn h2 </dev/null 2>/dev/null | grep ALPN
+```
+
+手工应急（不改站点、只止血）：把站点配置里的 `http2 on;` 注释掉、或把 `listen 443 ssl http2;` 改成 `listen 443 ssl;`，然后 `nginx -t && systemctl reload nginx`。
 
 ---
 
@@ -159,10 +205,18 @@ chown -R caddy:caddy /var/log/caddy
 Nginx 站点已经写了 `client_max_body_size 0`；Caddy 没有这个上限。如果前面还有 CDN，去 CDN 放开。
 
 **登录报 403（反代别人的 Emby / CDN 域名）？**
-上游按 `Host` 分流时，Host 必须是上游自己的域名。现在默认就是（`{upstream_hostport}` / `$proxy_host`）；老站点升级后需重新 `add --force` 才会重写配置。
+上游按 `Host` 分流时，Host 必须是上游自己的域名。现在默认就是（`{upstream_hostport}` / `$proxy_host`），跟 `wuuduf/emby-proxy` 一致；老站点升级后需重新 `add --force` 才会重写配置。
 
 - 上游是别名、需要伪装成别的域名：`--upstream-host cdn.example.com`
 - 反代本机 Emby、非想要客户端域名：`--host-mode client`
+
+**`curl` 拿到 403，但客户端能播？**
+分享站普遍对 `curl` / 无 Referer 的请求直接 403，这**不是反代坏了**。判断是否正常请看
+`emby-rp logs <name>` 里有没有真实播放请求，或用 Emby 客户端实测。
+
+**客户端只提 h2，报 `tlsv1 alert no application protocol`？**
+1.1.2 起默认关 HTTP/2，所以只协商 `h2` 时会收到 SSL alert 120，属**预期行为**，不是故障；
+确认 nginx 已 ≥ 1.31.9 后再 `--http2 on` 即可。
 
 **`certbot renew` 会失败吗？**
 不会。渲染出来的 HTTP server 里一直保留 `/.well-known/acme-challenge/` → `/var/www/emby-rp-acme`。
@@ -172,12 +226,8 @@ Nginx 站点已经写了 `client_max_body_size 0`；Caddy 没有这个上限。�
 ## 设计上的几个选择
 
 - **不用 `set -e`**：单条命令失败就整段退出容易留下半套配置，改成显式判错 + 回滚。
-- **默认不剥前缀（keep）**：`/emby/xxx` 原样转给后端，同时把 Emby 的 `Base URL` 设成 `/emby`，官方 Web UI、WebSocket、图片、HLS 全部自洽。
-- **`--strip` 只作兼容开关**：后端动不了 Base URL 时才用。
-- **前缀只禁三处**：`/`、`/.well-known`、`/_emby_rp_health`，其余随便用（包括 `/emby`）。
 - **元数据与配置分离**：站点信息在 `sites/<name>.conf`，随时能 `render` 重建；改错了删掉重来即可。
 - **一个站点一个文件**：Caddy 走 `import` 片段，Nginx 走 `conf.d`，多站点互不影响。
-- **落地物有清单**：所有文件登记在 `/etc/emby-rp`，`uninstall` 按清单清除，结束后自动做残留自检。
 - **幂等**：重复 `add` 同名时向导会问要不要覆盖；加 `--force` 直接原地覆盖（先拆旧配置，证书保留）；`-n <名字>` 可换名共存。
 
 ---
