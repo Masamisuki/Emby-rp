@@ -170,6 +170,12 @@ chown -R caddy:caddy /var/log/caddy
 **大文件上传 413？**
 Nginx 站点已经写了 `client_max_body_size 0`；Caddy 没有这个上限。如果前面还有 CDN，去 CDN 放开。
 
+**登录报 403（反代别人的 Emby / CDN 域名）？**
+上游按 `Host` 分流时，Host 必须是上游自己的域名。现在默认就是（`{upstream_hostport}` / `$proxy_host`），跟 `wuuduf/emby-proxy` 一致；老站点升级后需重新 `add --force` 才会重写配置。
+
+- 上游是别名、需要伪装成别的域名：`--upstream-host cdn.example.com`
+- 反代本机 Emby、非想要客户端域名：`--host-mode client`
+
 **`certbot renew` 会失败吗？**
 不会。渲染出来的 HTTP server 里一直保留 `/.well-known/acme-challenge/` → `/var/www/emby-rp-acme`。
 

@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.2"
+VERSION="1.0.3"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -115,6 +115,7 @@ reset_site_vars() {
 	SITE_TLS="auto"; SITE_CERT=""; SITE_KEY=""; SITE_EMAIL=""
 	SITE_HTTP_PORT="80"; SITE_HTTPS_PORT="443"
 	SITE_CF=0; SITE_UPSTREAM_INSECURE=0; SITE_ACCESS_LOG=1
+	SITE_HOST_MODE="upstream"; SITE_HOST_VALUE=""
 	SITE_CREATED=""; FRONTEND_CREATED=0
 }
 reset_site_vars
@@ -152,6 +153,8 @@ save_site() {
 		printf 'SITE_CF=%q\n'        "$SITE_CF"
 		printf 'SITE_UPSTREAM_INSECURE=%q\n' "$SITE_UPSTREAM_INSECURE"
 		printf 'SITE_ACCESS_LOG=%q\n' "$SITE_ACCESS_LOG"
+		printf 'SITE_HOST_MODE=%q\n' "${SITE_HOST_MODE:-upstream}"
+		printf 'SITE_HOST_VALUE=%q\n' "${SITE_HOST_VALUE:-}"
 		printf 'SITE_CREATED=%q\n'   "${SITE_CREATED:-$(date '+%F %T')}"
 		printf 'FRONTEND_CREATED=%q\n' "$FRONTEND_CREATED"
 	} > "$f"
@@ -406,7 +409,13 @@ caddy_proxy_block() {
 		[[ "$SITE_UPSTREAM_INSECURE" == "1" ]] && printf '%s\t\ttls_insecure_skip_verify\n' "$ind"
 	fi
 	printf '%s\t}\n' "$ind"
-	printf '%s\theader_up Host {host}\n' "$ind"
+	local host_up
+	case "${SITE_HOST_MODE:-upstream}" in
+		client)  host_up='{host}' ;;
+		value)   host_up="${SITE_HOST_VALUE}" ;;
+		*)       host_up='{upstream_hostport}' ;;
+	esac
+	printf '%s\theader_up Host %s\n' "$ind" "$host_up"
 	printf '%s\theader_up X-Real-IP %s\n' "$ind" "$ip_expr"
 	# X-Forwarded-Proto / Host 由 reverse_proxy 默认透传，无需重复设置
 	[[ -n "$pubprefix" ]] && printf '%s\theader_up X-Forwarded-Prefix %s\n' "$ind" "$pubprefix"
@@ -492,7 +501,11 @@ nginx_proxy_common() {
 	printf '%sproxy_http_version 1.1;\n' "$ind"
 	printf '%sproxy_set_header Upgrade $http_upgrade;\n' "$ind"
 	printf '%sproxy_set_header Connection $emby_rp_conn_%s;\n' "$ind" "$mapvar"
-	printf '%sproxy_set_header Host $host;\n' "$ind"
+	case "${SITE_HOST_MODE:-upstream}" in
+		client) printf '%sproxy_set_header Host $host;\n' "$ind" ;;
+		value)  printf '%sproxy_set_header Host %s;\n' "$ind" "${SITE_HOST_VALUE}" ;;
+		*)      printf '%sproxy_set_header Host $proxy_host;\n' "$ind" ;;
+	esac
 	if [[ "$SITE_CF" == "1" ]]; then
 		printf '%sproxy_set_header X-Real-IP $http_cf_connecting_ip;\n' "$ind"
 	else
@@ -800,7 +813,7 @@ cmd_add() {
 
 	local domain="" engine="" mode="" prefix="" strip="0" frontend="" upstream=""
 	local tls="" cert="" key="" email="" name="" http_port="" https_port=""
-	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick
+	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -822,6 +835,8 @@ cmd_add() {
 			--cf)          cf="1"; shift ;;
 			--upstream-insecure) insecure="1"; shift ;;
 			--no-log)      access_log="0"; shift ;;
+			--host-mode)   host_mode="${2:-}"; shift 2 ;;
+			--upstream-host) host_mode="value"; host_value="${2:-}"; shift 2 ;;
 			--force)       force=1; shift ;;
 			-y|--yes)      yes=1; shift ;;
 			-h|--help)     usage; return 0 ;;
@@ -1008,6 +1023,8 @@ cmd_add() {
 	SITE_CF="$cf"
 	SITE_UPSTREAM_INSECURE="$insecure"
 	SITE_ACCESS_LOG="$access_log"
+	SITE_HOST_MODE="${host_mode:-upstream}"
+	SITE_HOST_VALUE="$host_value"
 	save_site
 
 	# ---------- 证书 ----------
@@ -1446,6 +1463,10 @@ add 选项：
       --http-port <端口> --https-port <端口>
       --cf                       前端走 Cloudflare（从 Cf-Connecting-IP 取真实 IP）
       --upstream-insecure        上游证书自签时跳过校验（会自动检测）
+      --upstream-host <host>     传给上游的 Host 头（默认自动用上游自身域名）
+      --host-mode upstream|client
+                                 upstream=用上游域名（默认，反代 CDN/别人的 Emby 必选）
+                                 client=用客户端访问的域名（老行为，本地 Emby 也能用）
       --no-log                   不写访问日志
   -n, --name <名字>              站点名，默认由域名生成
       --force                    同名站点已存在时直接覆盖（先拆旧配置再建）
