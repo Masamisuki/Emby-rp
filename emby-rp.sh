@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.5"
+VERSION="1.0.6"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -413,9 +413,10 @@ caddy_proxy_block() {
 	printf '%s\t}\n' "$ind"
 	local host_up
 	case "${SITE_HOST_MODE:-upstream}" in
-		client)  host_up='{host}' ;;
-		value)   host_up="${SITE_HOST_VALUE}" ;;
-		*)       host_up='{upstream_hostport}' ;;
+		client)        host_up='{host}' ;;
+		upstream-port) host_up='{upstream_hostport}' ;;
+		value)         host_up="${SITE_HOST_VALUE}" ;;
+		*)             host_up="$(upstream_host_only "$SITE_UPSTREAM")" ;;
 	esac
 	printf '%s\theader_up Host %s\n' "$ind" "$host_up"
 	printf '%s\theader_up X-Real-IP %s\n' "$ind" "$ip_expr"
@@ -504,9 +505,10 @@ nginx_proxy_common() {
 	printf '%sproxy_set_header Upgrade $http_upgrade;\n' "$ind"
 	printf '%sproxy_set_header Connection $emby_rp_conn_%s;\n' "$ind" "$mapvar"
 	case "${SITE_HOST_MODE:-upstream}" in
-		client) printf '%sproxy_set_header Host $host;\n' "$ind" ;;
-		value)  printf '%sproxy_set_header Host %s;\n' "$ind" "${SITE_HOST_VALUE}" ;;
-		*)      printf '%sproxy_set_header Host $proxy_host;\n' "$ind" ;;
+		client)        printf '%sproxy_set_header Host $host;\n' "$ind" ;;
+		upstream-port) printf '%sproxy_set_header Host $proxy_host;\n' "$ind" ;;
+		value)         printf '%sproxy_set_header Host %s;\n' "$ind" "${SITE_HOST_VALUE}" ;;
+		*)             printf '%sproxy_set_header Host %s;\n' "$ind" "$(upstream_host_only "$SITE_UPSTREAM")" ;;
 	esac
 	if [[ "$SITE_CF" == "1" ]]; then
 		printf '%sproxy_set_header X-Real-IP $http_cf_connecting_ip;\n' "$ind"
@@ -678,6 +680,16 @@ validate_prefix() {
 validate_upstream() {
 	local u="$1"
 	[[ "$u" =~ ^https?://[^/[:space:]]+ ]] || die "源站格式不对：$u（例：https://stream-1.example.com 或 http://127.0.0.1:8096）"
+}
+
+# 从 upstream URL 取纯主机名（无协议/路径/端口）
+upstream_host_only() {
+	local h="${1#*://}"
+	h="${h%%/*}"
+	case "$h" in
+		*:* ) h="${h%:*}" ;;
+	esac
+	printf '%s' "$h"
 }
 
 # 没写协议时自动补：无端口或 :443 → https，其它端口 → http
@@ -1499,9 +1511,10 @@ add 选项：
       --cf                       前端走 Cloudflare（从 Cf-Connecting-IP 取真实 IP）
       --upstream-insecure        上游证书自签时跳过校验（会自动检测）
       --upstream-host <host>     传给上游的 Host 头（默认自动用上游自身域名）
-      --host-mode upstream|client
-                                 upstream=用上游域名（默认，反代 CDN/别人的 Emby 必选）
-                                 client=用客户端访问的域名（老行为，本地 Emby 也能用）
+      --host-mode upstream|client|upstream-port
+                                 upstream=只用上游域名（默认，推荐）
+                                 upstream-port=上游域名:端口（有的站会拒绝）
+                                 client=客户端访问的域名（老行为）
       --no-log                   不写访问日志
   -n, --name <名字>              站点名，默认由域名生成
       --force                    同名站点已存在时直接覆盖（先拆旧配置再建）
