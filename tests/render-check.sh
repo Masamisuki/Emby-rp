@@ -1,5 +1,5 @@
 #!/bin/bash
-# 渲染 + 校验：source 主脚本，渲染 4 类组合并交给 caddy validate
+# 渲染 + 校验：source 主脚本，渲染各组合并交给 caddy validate
 source /root/emby-rp.sh
 mkdir -p /tmp/rt
 
@@ -25,6 +25,8 @@ set_site() {
 		ports) SITE_HTTP_PORT="8080"; SITE_HTTPS_PORT="8443" ;;
 		filecert) SITE_TLS="file"; SITE_CERT="/root/.caddybin/t.pem"; SITE_KEY="/root/.caddybin/t.key" ;;
 		nolog) SITE_ACCESS_LOG=0 ;;
+		h2on) SITE_HTTP2="on" ;;
+		h2off) SITE_HTTP2="off" ;;
 	esac
 }
 
@@ -45,7 +47,7 @@ run() {
 	fi
 }
 
-for tag in default strip url insecure nones ports filecert nolog; do
+for tag in default strip url insecure nones ports filecert nolog h2on h2off; do
 	run caddy standalone "$tag"
 	run caddy split "$tag"
 	run nginx standalone "$tag"
