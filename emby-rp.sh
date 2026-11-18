@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.9"
+VERSION="1.1.0"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -532,6 +532,9 @@ nginx_proxy_common() {
 	printf '%ssend_timeout 3600s;\n' "$ind"
 	if [[ "$SITE_UPSTREAM_INSECURE" == "1" ]]; then
 		printf '%sproxy_ssl_verify off;\n' "$ind"
+	fi
+	# https 上游必须带 SNI，否则 Cloudflare 会回 421 Misdirected Request
+	if [[ "$SITE_UPSTREAM" == https://* ]]; then
 		printf '%sproxy_ssl_server_name on;\n' "$ind"
 	fi
 	# 响应体替换（把上游的推流域名/旧域名换成自己的）
