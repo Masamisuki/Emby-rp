@@ -15,7 +15,7 @@
 set -uo pipefail
 
 CMD_NAME="emby-rp"
-VERSION="1.0.6"
+VERSION="1.0.7"
 
 CONF_DIR="/etc/emby-rp"
 SITES_DIR="$CONF_DIR/sites"
@@ -117,7 +117,7 @@ reset_site_vars() {
 	SITE_TLS="auto"; SITE_CERT=""; SITE_KEY=""; SITE_EMAIL=""
 	SITE_HTTP_PORT="80"; SITE_HTTPS_PORT="443"
 	SITE_CF=0; SITE_UPSTREAM_INSECURE=0; SITE_ACCESS_LOG=1
-	SITE_HOST_MODE="upstream"; SITE_HOST_VALUE=""
+	SITE_HOST_MODE="upstream"; SITE_HOST_VALUE=""; SITE_REWRITES=""
 	SITE_CREATED=""; FRONTEND_CREATED=0
 }
 reset_site_vars
@@ -157,6 +157,7 @@ save_site() {
 		printf 'SITE_ACCESS_LOG=%q\n' "$SITE_ACCESS_LOG"
 		printf 'SITE_HOST_MODE=%q\n' "${SITE_HOST_MODE:-upstream}"
 		printf 'SITE_HOST_VALUE=%q\n' "${SITE_HOST_VALUE:-}"
+		printf 'SITE_REWRITES=%q\n' "${SITE_REWRITES:-}"
 		printf 'SITE_CREATED=%q\n'   "${SITE_CREATED:-$(date '+%F %T')}"
 		printf 'FRONTEND_CREATED=%q\n' "$FRONTEND_CREATED"
 	} > "$f"
@@ -529,6 +530,19 @@ nginx_proxy_common() {
 		printf '%sproxy_ssl_verify off;\n' "$ind"
 		printf '%sproxy_ssl_server_name on;\n' "$ind"
 	fi
+	# 响应体替换（把上游的推流域名/旧域名换成自己的）
+	if [[ -n "${SITE_REWRITES:-}" ]]; then
+		local pair from to
+		printf '%sproxy_set_header Accept-Encoding "";\n' "$ind"
+		for pair in $SITE_REWRITES; do
+			from="${pair%%=>*}"
+			to="${pair#*=>}"
+			[[ -n "$from" ]] || continue
+			printf "%ssub_filter '%s' '%s';\n" "$ind" "$from" "$to"
+		done
+		printf '%ssub_filter_once off;\n' "$ind"
+		printf '%ssub_filter_types *;\n' "$ind"
+	fi
 	return 0
 }
 
@@ -853,7 +867,7 @@ cmd_add() {
 
 	local domain="" engine="" mode="" prefix="" strip="0" frontend="" upstream=""
 	local tls="" cert="" key="" email="" name="" http_port="" https_port=""
-	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value=""
+	local cf="0" insecure="0" access_log="1" yes=0 force=0 pick host_mode="" host_value="" rewrites=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -877,6 +891,7 @@ cmd_add() {
 			--no-log)      access_log="0"; shift ;;
 			--host-mode)   host_mode="${2:-}"; shift 2 ;;
 			--upstream-host) host_mode="value"; host_value="${2:-}"; shift 2 ;;
+			-R|--rewrite)  rewrites="${rewrites:+$rewrites }${2:-}"; shift 2 ;;
 			--force)       force=1; shift ;;
 			-y|--yes)      yes=1; shift ;;
 			-h|--help)     usage; return 0 ;;
@@ -929,6 +944,10 @@ cmd_add() {
 		fi
 	fi
 	case "$engine" in caddy|nginx) ;; *) die "--engine 只能是 caddy 或 nginx" ;; esac
+
+	if [[ -n "${rewrites:-}" && "$engine" != "nginx" ]]; then
+		die "--rewrite（修改响应体里的推流域名）依赖 nginx 的 sub_filter，Caddy 原生不支持；请改用 -e nginx"
+	fi
 
 	# ---------- 模式 ----------
 	if [[ -z "$mode" ]]; then
@@ -1066,6 +1085,20 @@ cmd_add() {
 	SITE_ACCESS_LOG="$access_log"
 	SITE_HOST_MODE="${host_mode:-upstream}"
 	SITE_HOST_VALUE="$host_value"
+	# --rewrite from[=>to]，只写 from 时换成本站域名
+	SITE_REWRITES=""
+	if [[ -n "$rewrites" ]]; then
+		local rk rf rt
+		for rk in $rewrites; do
+			if [[ "$rk" == *"=>"* ]]; then
+				rf="${rk%%=>*}"; rt="${rk#*=>}"
+			else
+				rf="$rk"; rt="$domain"
+			fi
+			[[ -n "$rf" && -n "$rt" ]] || continue
+			SITE_REWRITES="${SITE_REWRITES:+$SITE_REWRITES }$rf=>$rt"
+		done
+	fi
 	save_site
 
 	# ---------- 证书 ----------
@@ -1510,7 +1543,10 @@ add 选项：
       --http-port <端口> --https-port <端口>
       --cf                       前端走 Cloudflare（从 Cf-Connecting-IP 取真实 IP）
       --upstream-insecure        上游证书自签时跳过校验（会自动检测）
-      --upstream-host <host>     传给上游的 Host 头（默认自动用上游自身域名）
+      --upstream-host <host>     传给上游的 Host 头（默认自动用上游自身域名，不带端口）
+  -R, --rewrite <from[=>to]>     nginx：替换响应体里的域名（可重复）
+                                 --rewrite stream-1.a.com=>wawo3.lhc520.com
+                                 只写 from 时换成本站域名；依赖 sub_filter，仅 nginx
       --host-mode upstream|client|upstream-port
                                  upstream=只用上游域名（默认，推荐）
                                  upstream-port=上游域名:端口（有的站会拒绝）
